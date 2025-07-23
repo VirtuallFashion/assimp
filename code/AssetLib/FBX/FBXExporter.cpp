@@ -1407,6 +1407,8 @@ void FBXExporter::WriteObjects () {
 
 
     // aiMaterial
+    std::map<int64_t, bool> use_gltf_by_mat_uuid;
+
     material_uids.clear();
     for (size_t i = 0; i < mScene->mNumMaterials; ++i) {
         // it's all about this material
@@ -1432,14 +1434,35 @@ void FBXExporter::WriteObjects () {
         f = 0;
         m->Get(AI_MATKEY_SHININESS, f);
         bool phong = (f > 0);
-        if (phong) {
-            n.AddChild("ShadingModel", "phong");
+        aiString alpha_mode;
+        //TODO: better way to detect glTF materials?
+        bool useGltfMaterial = m->Get("$mat.gltf.alphaMode", 0, 0, alpha_mode) == aiReturn_SUCCESS;
+        use_gltf_by_mat_uuid[uid] = useGltfMaterial;
+        if(useGltfMaterial) {
+            n.AddChild("ShadingModel", "unknown");
         } else {
-            n.AddChild("ShadingModel", "lambert");
+            if (phong) {
+                n.AddChild("ShadingModel", "phong");
+            } else {
+                n.AddChild("ShadingModel", "lambert");
+            }
         }
         n.AddChild("MultiLayer", int32_t(0));
 
         FBX::Node p("Properties70");
+
+        if(useGltfMaterial) {
+            // set shader type props for 3dsMax (glTF Material)
+            p.AddP70string("ShadingModel", "unknown");
+            p.AddP70("3dsMax", "Compound", "", "");
+            p.AddP70int("3dsMax|ClassIDa", 0x38420192u);
+            p.AddP70int("3dsMax|ClassIDb", 0x45fe4e1bu);
+            p.AddP70int("3dsMax|SuperClassID", 3072);
+            p.AddP70("3dsMax|main", "Compound", "", "");
+            p.AddP70double("3dsMax|main|roughness", 1.0);
+            p.AddP70("3dsMax|main|baseColorMap", "Reference", "", "A");
+            p.AddP70("3dsMax|main|normalMap", "Reference", "", "A");
+        }
 
         // materials exported using the FBX SDK have two sets of fields.
         // there are the properties specified in the PropertyTemplate,
@@ -1582,6 +1605,72 @@ void FBXExporter::WriteObjects () {
         }
     }
 
+
+    // Textures referenced by material_index/texture_type pairs.
+    std::map<std::pair<size_t,size_t>,int64_t> texture_uids;
+    const std::map<aiTextureType,std::string> prop_name_by_tt = {
+        {aiTextureType_DIFFUSE,      "DiffuseColor"},
+        {aiTextureType_SPECULAR,     "SpecularColor"},
+        {aiTextureType_AMBIENT,      "AmbientColor"},
+        {aiTextureType_EMISSIVE,     "EmissiveColor"},
+        {aiTextureType_HEIGHT,       "Bump"},
+        {aiTextureType_NORMALS,      "NormalMap"},
+        {aiTextureType_SHININESS,    "ShininessExponent"},
+        {aiTextureType_OPACITY,      "TransparentColor"},
+        {aiTextureType_DISPLACEMENT, "DisplacementColor"},
+        //{aiTextureType_LIGHTMAP, "???"},
+        {aiTextureType_REFLECTION,   "ReflectionColor"}
+        //{aiTextureType_UNKNOWN, ""}
+    };
+
+    // find the channels types where textures are used
+    std::map<std::string, std::vector<aiTextureType>> ttypes_by_image;
+    for (size_t i = 0; i < mScene->mNumMaterials; ++i) {
+        // textures are attached to materials
+        aiMaterial* mat = mScene->mMaterials[i];
+
+        for (
+            size_t j = aiTextureType_DIFFUSE;
+            j < aiTextureType_UNKNOWN;
+            ++j
+        ) {
+            const aiTextureType tt = static_cast<aiTextureType>(j);
+            size_t n = mat->GetTextureCount(tt);
+
+            if (n < 1) { // no texture of this type
+                continue;
+            }
+
+            if (n > 1) {
+                // TODO: multilayer textures
+                std::stringstream err;
+                err << "Multilayer textures not supported (for now),";
+                err << " skipping texture type " << j;
+                err << " of material " << i;
+                ASSIMP_LOG_WARN(err.str());
+            }
+
+            // get image path for this (single-image) texture
+            aiString tpath;
+            if (mat->GetTexture(tt, 0, &tpath) != aiReturn_SUCCESS) {
+                std::stringstream err;
+                err << "Failed to get texture 0 for texture of type " << tt;
+                err << " on material " << i;
+                err << ", however GetTextureCount returned 1.";
+                throw DeadlyExportError(err.str());
+            }
+            const std::string texture_path(tpath.C_Str());
+
+            auto ttypes = ttypes_by_image.find(texture_path);
+            if (ttypes == ttypes_by_image.end()) {
+                ttypes_by_image[texture_path] = std::vector<aiTextureType>();
+                ttypes = ttypes_by_image.find(texture_path);
+            }
+            ttypes->second.push_back(tt);
+        }
+    }
+
+
     std::map<std::string, std::string> tpath_by_image;
     // FbxVideo - stores images used by textures.
     for (const auto &it : uid_by_image) {
@@ -1602,6 +1691,7 @@ void FBXExporter::WriteObjects () {
             std::stringstream newPath;
             if (embedded_texture->mFilename.length > 0) {
                 newPath << embedded_texture->mFilename.C_Str();
+
                 // If newPath doesn't end in an extension, add extension from embedded_texture->achFormatHint
                 std::string np = newPath.str();
                 size_t dot_pos = np.find_last_of('.');
@@ -1613,10 +1703,47 @@ void FBXExporter::WriteObjects () {
                 int texture_index = std::stoi(path.substr(1, path.size() - 1));
                 newPath << texture_index << "." << embedded_texture->achFormatHint;
             }
+
+            // check if this texture is used as non-color type
+            auto ttypes_it = ttypes_by_image.find(path);
+            bool nonColor = false;
+            if (ttypes_it != ttypes_by_image.end()) {
+                for (const auto &tt : ttypes_it->second) {
+                    switch (tt) {
+                        case aiTextureType_NORMALS:
+                        case aiTextureType_METALNESS:
+                        case aiTextureType_DIFFUSE_ROUGHNESS:
+                            nonColor = true;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }
+
+            // if nonColor add "_ACEScg" to the newPath before the extension
+            // this allows 3dsMax to correctly interpret the texture as non-color data
+            if (nonColor) {
+                size_t dot_pos = newPath.str().find_last_of('.');
+                if (dot_pos != std::string::npos) {
+                    std::stringstream newPathWithAces;
+                    newPathWithAces << newPath.str().substr(0, dot_pos) << "_ACEScg" << newPath.str().substr(dot_pos);
+                    newPath.str(newPathWithAces.str());
+                } else {
+                    // no dot found, just append "_ACEScg"
+                    newPath << "_ACEScg";
+                }
+            }
+
+            std::stringstream log;
+            log << "Embedding texture: " << path << " -> " << newPath.str();
+            ASSIMP_LOG_DEBUG(log.str());
+
             auto elem = tpath_by_image.find(path);
             if (elem == tpath_by_image.end()) {
                 tpath_by_image[path] = newPath.str();
             }
+
             path = newPath.str();
             // embed the texture
             size_t texture_size = static_cast<size_t>(embedded_texture->mWidth * std::max(embedded_texture->mHeight, 1u));
@@ -1641,22 +1768,6 @@ void FBXExporter::WriteObjects () {
     }
 
     // Textures
-    // referenced by material_index/texture_type pairs.
-    std::map<std::pair<size_t,size_t>,int64_t> texture_uids;
-    const std::map<aiTextureType,std::string> prop_name_by_tt = {
-        {aiTextureType_DIFFUSE,      "DiffuseColor"},
-        {aiTextureType_SPECULAR,     "SpecularColor"},
-        {aiTextureType_AMBIENT,      "AmbientColor"},
-        {aiTextureType_EMISSIVE,     "EmissiveColor"},
-        {aiTextureType_HEIGHT,       "Bump"},
-        {aiTextureType_NORMALS,      "NormalMap"},
-        {aiTextureType_SHININESS,    "ShininessExponent"},
-        {aiTextureType_OPACITY,      "TransparentColor"},
-        {aiTextureType_DISPLACEMENT, "DisplacementColor"},
-        //{aiTextureType_LIGHTMAP, "???"},
-        {aiTextureType_REFLECTION,   "ReflectionColor"}
-        //{aiTextureType_UNKNOWN, ""}
-    };
     for (size_t i = 0; i < mScene->mNumMaterials; ++i) {
         // textures are attached to materials
         aiMaterial* mat = mScene->mMaterials[i];
@@ -1727,6 +1838,24 @@ void FBXExporter::WriteObjects () {
             connections.emplace_back(
                 "C", "OP", texture_uid, material_uid, prop_name
             );
+            if(use_gltf_by_mat_uuid[material_uid]) {
+                // if this is a glTF material, we need to also use the glTF texture type
+                std::string gltf_prop_name = prop_name;
+                switch (tt) {
+                    case aiTextureType_DIFFUSE:
+                        gltf_prop_name = "3dsMax|main|baseColorMap";
+                        break;
+                    case aiTextureType_NORMALS:
+                        gltf_prop_name = "3dsMax|main|normalMap";
+                        break;
+                    default:
+                        break;
+                }
+                if(!gltf_prop_name.empty()) {
+                    connections.emplace_back("C", "OP", texture_uid, material_uid, gltf_prop_name);
+                }
+            }
+
 
             // link the image data to the texture
             connections.emplace_back("C", "OO", image_uid, texture_uid);
