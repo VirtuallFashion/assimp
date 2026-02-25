@@ -1041,11 +1041,10 @@ size_t Accessor::ExtractData(T *&outData, const std::vector<unsigned int> *remap
     outData = new T[usedCount];
 
     if (remappingIndices != nullptr) {
-        const unsigned int maxIndexCount = static_cast<unsigned int>(maxSize / stride);
         for (size_t i = 0; i < usedCount; ++i) {
             size_t srcIdx = (*remappingIndices)[i];
-            if (srcIdx >= maxIndexCount) {
-                throw DeadlyImportError("GLTF: index*stride ", (srcIdx * stride), " > maxSize ", maxSize, " in ", getContextForErrorMessages(id, name));
+            if (srcIdx * stride + elemSize > maxSize) {
+                throw DeadlyImportError("GLTF: index*stride ", (srcIdx * stride), " > maxSize ", maxSize, " elemSize", elemSize, " in ", getContextForErrorMessages(id, name));
             }
             memcpy(outData + i, data + srcIdx * stride, elemSize);
         }
