@@ -1462,6 +1462,8 @@ void FBXExporter::WriteObjects () {
             p.AddP70double("3dsMax|main|roughness", 1.0);
             p.AddP70("3dsMax|main|baseColorMap", "Reference", "", "A");
             p.AddP70("3dsMax|main|normalMap", "Reference", "", "A");
+            p.AddP70("3dsMax|main|roughnessMap", "Reference", "", "A");
+            p.AddP70("3dsMax|main|metalnessMap", "Reference", "", "A");
         }
 
         // materials exported using the FBX SDK have two sets of fields.
@@ -1619,7 +1621,12 @@ void FBXExporter::WriteObjects () {
         {aiTextureType_OPACITY,      "TransparentColor"},
         {aiTextureType_DISPLACEMENT, "DisplacementColor"},
         //{aiTextureType_LIGHTMAP, "???"},
-        {aiTextureType_REFLECTION,   "ReflectionColor"}
+        {aiTextureType_REFLECTION,   "ReflectionColor"},
+        {aiTextureType_BASE_COLOR,        "BaseColor"},
+        {aiTextureType_NORMAL_CAMERA,     "NormalCamera"},
+        {aiTextureType_EMISSION_COLOR,    "EmissionColor"},
+        {aiTextureType_METALNESS,         "Metalness"},
+        {aiTextureType_DIFFUSE_ROUGHNESS, "Roughness"}
         //{aiTextureType_UNKNOWN, ""}
     };
 
@@ -1847,6 +1854,9 @@ void FBXExporter::WriteObjects () {
                         break;
                     case aiTextureType_NORMALS:
                         gltf_prop_name = "3dsMax|main|normalMap";
+                        break;
+                    case aiTextureType_DIFFUSE_ROUGHNESS:
+                        gltf_prop_name = "3dsMax|main|roughnessMap";
                         break;
                     default:
                         break;
